@@ -46,6 +46,11 @@ local GEARS = {
 
 	{ name = "Bug Juice",                    kind = "speed", id = 57229313, speed = 60 },
 	{ name = "Spec Alpha Biograft Energy Sword", kind = "melee", id = 11999235 },
+
+	{ name = "Frost Potion",                 kind = "frost",    id = 42845896 },
+	{ name = "Magical Rainbow Pony",         kind = "rainbow",  id = 26417031 },
+	{ name = "Teleporting Gun",              kind = "wormhole", id = 34870758 },
+	{ name = "Positronic Platform Producer", kind = "platform", id = 34898883 },
 }
 
 local SHOT_SOUND_ID = "rbxassetid://99204505"
@@ -132,16 +137,20 @@ local function preload(id, done)
 	loading[id] = true
 	task.spawn(function()
 		local template = false
-		local ok, objs = pcall(function()
-			return game:GetObjects("rbxassetid://" .. id)
-		end)
-		if ok and objs and objs[1] then
-			local t = objs[1]:IsA("Tool") and objs[1] or objs[1]:FindFirstChildWhichIsA("Tool", true)
-			if t then
-				t.Parent = nil
-				stripScripts(t)
-				template = t
+		for attempt = 1, 4 do -- retry so every real model loads
+			local ok, objs = pcall(function()
+				return game:GetObjects("rbxassetid://" .. id)
+			end)
+			if ok and objs and objs[1] then
+				local t = objs[1]:IsA("Tool") and objs[1] or objs[1]:FindFirstChildWhichIsA("Tool", true)
+				if t then
+					t.Parent = nil
+					stripScripts(t)
+					template = t
+					break
+				end
 			end
+			task.wait(0.5 * attempt)
 		end
 		cache[id] = template
 		loading[id] = nil
@@ -735,11 +744,256 @@ do
 	end)
 end
 
+-- ===== FROST POTION: a solid block of ice around you =====
+local function setupFrost(tool)
+	local ready = true
+	onUse(tool, function()
+		if not ready then return end
+		ready = false
+		task.delay(2, function() ready = true end)
+		local char = getChar()
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
+
+		local ice = Instance.new("Part")
+		ice.Name = "FrostBlock"
+		ice.Size = Vector3.new(7, 8, 7)
+		ice.Material = Enum.Material.Ice
+		ice.Color = Color3.fromRGB(150, 215, 255)
+		ice.Transparency = 0.35
+		ice.Anchored = true
+		ice.CanCollide = true
+		ice.CFrame = CFrame.new(hrp.Position)
+		-- you stand inside the ice, it never pushes you; everything else treats it as solid
+		for _, p in ipairs(char:GetDescendants()) do
+			if p:IsA("BasePart") then
+				local nc = Instance.new("NoCollisionConstraint")
+				nc.Part0 = ice
+				nc.Part1 = p
+				nc.Parent = ice
+			end
+		end
+		ice.Parent = workspace
+		say("Frost Potion: you are frozen in ice")
+
+		task.delay(10, function()
+			if not ice.Parent then return end
+			local tw = TweenService:Create(ice, TweenInfo.new(1), { Transparency = 1 })
+			tw:Play()
+			tw.Completed:Wait()
+			ice:Destroy()
+		end)
+	end)
+end
+
+-- ===== MAGICAL RAINBOW PONY: rising rainbow platform under your feet =====
+local function setupPony(tool)
+	local ready = true
+	onUse(tool, function()
+		if not ready then return end
+		ready = false
+		task.delay(0.8, function() ready = true end)
+		local char = getChar()
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
+
+		local RISE_SPEED, RISE_TIME, LIFE = 16, 4, 9
+		local plat = Instance.new("Part")
+		plat.Name = "RainbowPlatform"
+		plat.Size = Vector3.new(9, 1, 9)
+		plat.Material = Enum.Material.Neon
+		plat.Anchored = true
+		plat.CanCollide = true
+		plat.CFrame = CFrame.new(hrp.Position.X, hrp.Position.Y - 3.7, hrp.Position.Z)
+		plat.Parent = workspace
+		say("Magical Rainbow Pony: rainbow platform rising")
+
+		local t, hue = 0, 0
+		local conn
+		conn = RunService.Heartbeat:Connect(function(dt)
+			t += dt
+			if t >= LIFE or not plat.Parent then
+				conn:Disconnect()
+				plat:Destroy()
+				return
+			end
+			hue = (hue + dt * 0.8) % 1
+			plat.Color = Color3.fromHSV(hue, 1, 1)
+			local rise = (t <= RISE_TIME) and RISE_SPEED or 0
+			plat.AssemblyLinearVelocity = Vector3.new(0, rise, 0) -- carries you up with it
+			plat.CFrame = plat.CFrame + Vector3.new(0, rise * dt, 0)
+			if t > LIFE - 1 then plat.Transparency = t - (LIFE - 1) end
+		end)
+	end)
+end
+
+-- ===== TELEPORTING GUN: shoot two linked portals, walk into one to come out the other =====
+local function setupWormhole(tool)
+	local handle = getHandle(tool)
+	local ready = true
+	local portals = {}
+	local nextIdx = 1
+	local cooldown = 0
+	local COLORS = { Color3.fromRGB(40, 140, 255), Color3.fromRGB(255, 140, 30) }
+
+	local function clearPortal(i)
+		if portals[i] then portals[i].part:Destroy() portals[i] = nil end
+	end
+
+	onUse(tool, function()
+		if not ready then return end
+		ready = false
+		task.delay(0.35, function() ready = true end)
+		local char = getChar()
+		local origin = handle.Position
+		local aim = aimPoint(origin, char)
+		local diff = aim - origin
+		if diff.Magnitude < 0.1 then return end
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { char }
+		local res = workspace:Raycast(origin, diff.Unit * (diff.Magnitude + 5), params)
+		if not res then
+			say("Teleporting Gun: aim at a surface")
+			return
+		end
+		local n = res.Normal
+		local pos = res.Position + n * 0.2
+		local idx = nextIdx
+		nextIdx = (idx == 1) and 2 or 1
+		clearPortal(idx)
+
+		local p = Instance.new("Part")
+		p.Name = "Portal" .. idx
+		p.Shape = Enum.PartType.Cylinder
+		p.Size = Vector3.new(0.3, 7, 5)
+		p.Material = Enum.Material.Neon
+		p.Color = COLORS[idx]
+		p.Anchored = true
+		p.CanCollide = false
+		p.CanQuery = false
+		p.CanTouch = false
+		local up = (math.abs(n.Y) > 0.9) and Vector3.xAxis or Vector3.yAxis
+		p.CFrame = CFrame.lookAt(pos, pos + n, up) * CFrame.Angles(0, math.pi / 2, 0)
+		local light = Instance.new("PointLight")
+		light.Color = COLORS[idx]
+		light.Range = 10
+		light.Parent = p
+		p.Parent = workspace
+		portals[idx] = { part = p, normal = n }
+		say(idx == 1 and "Teleporting Gun: blue portal placed" or "Teleporting Gun: orange portal placed")
+	end)
+
+	local conn = RunService.Heartbeat:Connect(function()
+		if not (portals[1] and portals[2]) then return end
+		if os.clock() < cooldown then return end
+		local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
+		for i = 1, 2 do
+			local a, b = portals[i], portals[3 - i]
+			local rel = a.part.CFrame:PointToObjectSpace(hrp.Position)
+			if math.abs(rel.X) < 3 and math.abs(rel.Y) < 4 and math.abs(rel.Z) < 3 then
+				cooldown = os.clock() + 1.2
+				local out = b.normal
+				local dest = b.part.Position + out * 4
+				local flat = Vector3.new(out.X, 0, out.Z)
+				local speed = math.clamp(hrp.AssemblyLinearVelocity.Magnitude, 10, 60)
+				if flat.Magnitude > 0.1 then
+					hrp.CFrame = CFrame.lookAt(dest, dest + flat)
+				else
+					hrp.CFrame = CFrame.new(dest) * (hrp.CFrame - hrp.Position)
+				end
+				hrp.AssemblyLinearVelocity = out * speed
+				break
+			end
+		end
+	end)
+	tool.Destroying:Connect(function()
+		conn:Disconnect()
+		clearPortal(1)
+		clearPortal(2)
+	end)
+end
+
+-- ===== POSITRONIC PLATFORM PRODUCER: beams that make temporary solid platforms =====
+local function setupPlatformGun(tool)
+	local handle = getHandle(tool)
+	addSound(handle, "Shot", SHOT_SOUND_ID, 0.5)
+	local ready = true
+
+	onUse(tool, function()
+		if not ready then return end
+		ready = false
+		task.delay(0.5, function() ready = true end)
+		local char = getChar()
+		local origin = handle.Position
+		local aim = aimPoint(origin, char)
+		local diff = aim - origin
+		if diff.Magnitude < 0.1 then return end
+		local dir = diff.Unit
+		handle.Shot.Pitch = math.random(90, 110) / 100
+		handle.Shot:Play()
+
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { char }
+		local res = workspace:Raycast(origin, dir * 300, params)
+		local hit, n
+		if res then
+			hit, n = res.Position, res.Normal
+		else
+			hit, n = origin + dir * 60, Vector3.yAxis
+		end
+
+		-- the beam
+		local len = (hit - origin).Magnitude
+		local beam = Instance.new("Part")
+		beam.Name = "PositronBeam"
+		beam.Size = Vector3.new(0.25, 0.25, len)
+		beam.Material = Enum.Material.Neon
+		beam.Color = Color3.fromRGB(0, 220, 255)
+		beam.Anchored = true
+		beam.CanCollide = false
+		beam.CanQuery = false
+		beam.CanTouch = false
+		beam.CFrame = CFrame.lookAt(origin, hit) * CFrame.new(0, 0, -len / 2)
+		beam.Parent = workspace
+		TweenService:Create(beam, TweenInfo.new(0.3), { Transparency = 1 }):Play()
+		Debris:AddItem(beam, 0.4)
+
+		-- the platform: sits on floors, sticks out sideways from walls
+		local pos
+		if n.Y > 0.7 then
+			pos = hit + Vector3.new(0, 0.5, 0)
+		else
+			pos = Vector3.new(hit.X + n.X * 5, hit.Y - 0.5, hit.Z + n.Z * 5)
+		end
+		local plat = Instance.new("Part")
+		plat.Name = "PositronPlatform"
+		plat.Size = Vector3.new(10, 1, 10)
+		plat.Material = Enum.Material.Neon
+		plat.Color = Color3.fromRGB(0, 200, 255)
+		plat.Transparency = 0.3
+		plat.Anchored = true
+		plat.CanCollide = true
+		plat.CFrame = CFrame.new(pos)
+		plat.Parent = workspace
+		say("Positronic Platform Producer: platform created")
+
+		task.delay(7, function()
+			if not plat.Parent then return end
+			TweenService:Create(plat, TweenInfo.new(1), { Transparency = 1 }):Play()
+		end)
+		Debris:AddItem(plat, 8)
+	end)
+end
+
 -- ===== give / remove =====
 local SETUP = {
 	carpet = setupCarpet, dryer = setupDryer, seabow = setupSeaBow,
 	gravity = setupGravity, speed = setupSpeed, jump = setupJump,
 	rocket = setupRocket, melee = setupMelee,
+	frost = setupFrost, rainbow = setupPony, wormhole = setupWormhole, platform = setupPlatformGun,
 }
 
 local HINTS = {
@@ -751,6 +1005,10 @@ local HINTS = {
 	speed = " - you run faster",
 	jump = " - you jump higher",
 	melee = " - tap to swing",
+	frost = " - tap to freeze yourself in a block of ice",
+	rainbow = " - tap for a rising rainbow platform",
+	wormhole = " - tap once for the blue portal, again for the orange one, then walk into one",
+	platform = " - tap to shoot a beam that makes a platform",
 }
 
 local active = {} -- name -> tool
@@ -780,7 +1038,8 @@ local function giveGear(cfg)
 		if not ok then problems[#problems + 1] = tostring(err) end
 	end
 	try(SETUP[cfg.kind], tool, cfg)
-	if cfg.kind == "carpet" or cfg.feet then try(setupFeet, tool, cfg) end
+	-- carpets/brooms stay in the hand; only foot gears (stilts) go under the feet
+	if cfg.feet then try(setupFeet, tool, cfg) end
 	tool.Equipped:Connect(function()
 		say(cfg.name .. " equipped" .. (HINTS[cfg.kind] or ""))
 	end)
@@ -802,9 +1061,23 @@ local function onLoaded(id)
 		if cfg.id == id then
 			local t = active[cfg.name]
 			-- swap built-in model for the real one, only if it is not being held right now
-			if t and t:GetAttribute("Fallback") and bp and t.Parent == bp and cache[id] then
-				giveGear(cfg)
-				if rows[cfg.name] then rows[cfg.name].setOn(active[cfg.name] ~= nil) end
+			if t and t:GetAttribute("Fallback") and cache[id] then
+				local function swap()
+					if active[cfg.name] == t and wanted[cfg.name] then
+						giveGear(cfg)
+						if rows[cfg.name] then rows[cfg.name].setOn(active[cfg.name] ~= nil) end
+					end
+				end
+				if bp and t.Parent == bp then
+					swap()
+				else
+					-- being held right now: swap as soon as it is put away
+					local c
+					c = t.Unequipped:Connect(function()
+						c:Disconnect()
+						task.defer(swap)
+					end)
+				end
 			end
 		end
 	end
@@ -859,7 +1132,7 @@ local function buildGui()
 		BackgroundColor3 = BG, BorderSizePixel = 0, Active = true,
 	}, gui)
 	round(frame, 12)
-	mk("UIStroke", { Color = ACCENT, Thickness = 1.5, Transparency = 0.3 }, frame)
+	local stroke = mk("UIStroke", { Color = ACCENT, Thickness = 1.5, Transparency = 0.3 }, frame)
 
 	local bar = mk("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = PANEL, BorderSizePixel = 0 }, frame)
 	round(bar, 12)
@@ -881,7 +1154,7 @@ local function buildGui()
 
 	-- gear icon shown when minimised
 	local iconBtn = mk("TextButton", {
-		Name = "GearIcon", Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = PANEL, BorderSizePixel = 0,
+		Name = "GearIcon", Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = Color3.new(0, 0, 0), BorderSizePixel = 0,
 		Font = Enum.Font.SourceSansBold, Text = utf8.char(0x2699), TextSize = 32, TextColor3 = Color3.new(1, 1, 1),
 		AutoButtonColor = false, Visible = false, ZIndex = 5,
 	}, frame)
@@ -896,6 +1169,10 @@ local function buildGui()
 		body.Visible = not c
 		iconBtn.Visible = c
 		frame.Size = c and MINI_SIZE or FULL_SIZE
+		-- minimised gear icon: black background and black outline
+		frame.BackgroundColor3 = c and Color3.new(0, 0, 0) or BG
+		stroke.Color = c and Color3.new(0, 0, 0) or ACCENT
+		stroke.Transparency = c and 0 or 0.3
 	end
 
 	-- dragging (title bar and gear icon). A tap on the icon without moving opens the menu.
@@ -929,30 +1206,29 @@ local function buildGui()
 		end
 	end)
 
+	local search = mk("TextBox", {
+		Size = UDim2.new(1, -16, 0, 28), Position = UDim2.new(0, 8, 0, 8), BackgroundColor3 = PANEL, BorderSizePixel = 0,
+		Font = Enum.Font.Gotham, PlaceholderText = "Search gears...", PlaceholderColor3 = Color3.fromRGB(130, 130, 150),
+		Text = "", TextSize = 13, TextColor3 = Color3.new(1, 1, 1), ClearTextOnFocus = false,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, body)
+	round(search, 8)
+	mk("UIPadding", { PaddingLeft = UDim.new(0, 10) }, search)
+
 	local list = mk("ScrollingFrame", {
-		Size = UDim2.new(1, -16, 1, -92), Position = UDim2.new(0, 8, 0, 8), BackgroundTransparency = 1,
+		Size = UDim2.new(1, -16, 1, -128), Position = UDim2.new(0, 8, 0, 44), BackgroundTransparency = 1,
 		BorderSizePixel = 0, ScrollBarThickness = 4, CanvasSize = UDim2.new(0, 0, 0, 0),
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 	}, body)
 	mk("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, list)
 
-	local TYPE_LABEL = {
-		carpet = "FLY", speed = "SPEED", gravity = "GRAVITY", jump = "JUMP", melee = "SWORD",
-		dryer = "FAN", seabow = "BOW", rocket = "ROCKET",
-	}
-
 	for i, cfg in ipairs(GEARS) do
 		local row = mk("Frame", { Size = UDim2.new(1, -6, 0, 34), BackgroundColor3 = PANEL, BorderSizePixel = 0, LayoutOrder = i }, list)
 		round(row, 8)
 		mk("TextLabel", {
-			Size = UDim2.new(0.56, 0, 1, 0), Position = UDim2.new(0, 10, 0, 0), BackgroundTransparency = 1,
+			Size = UDim2.new(0.68, 0, 1, 0), Position = UDim2.new(0, 10, 0, 0), BackgroundTransparency = 1,
 			Font = Enum.Font.GothamMedium, Text = cfg.name, TextSize = 12, TextColor3 = Color3.new(1, 1, 1),
 			TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
-		}, row)
-		mk("TextLabel", {
-			Size = UDim2.new(0.14, 0, 1, 0), Position = UDim2.new(0.56, 0, 0, 0), BackgroundTransparency = 1,
-			Font = Enum.Font.Gotham, Text = TYPE_LABEL[cfg.kind] or "", TextSize = 9,
-			TextColor3 = Color3.fromRGB(150, 150, 170),
 		}, row)
 		local btn = mk("TextButton", {
 			Size = UDim2.new(0.28, 0, 0, 24), Position = UDim2.new(0.7, 0, 0, 5), BackgroundColor3 = OFF,
@@ -964,7 +1240,7 @@ local function buildGui()
 			btn.Text = on and "REMOVE" or "GIVE"
 			btn.BackgroundColor3 = on and ACCENT or OFF
 		end
-		rows[cfg.name] = { setOn = setOn }
+		rows[cfg.name] = { setOn = setOn, frame = row }
 
 		btn.MouseButton1Click:Connect(function()
 			local t = active[cfg.name]
@@ -979,6 +1255,13 @@ local function buildGui()
 			end
 		end)
 	end
+
+	search:GetPropertyChangedSignal("Text"):Connect(function()
+		local q = search.Text:lower()
+		for _, cfg in ipairs(GEARS) do
+			rows[cfg.name].frame.Visible = (q == "") or (cfg.name:lower():find(q, 1, true) ~= nil)
+		end
+	end)
 
 	local function footerButton(text, x, color)
 		local b = mk("TextButton", {
@@ -1031,6 +1314,17 @@ local function buildGui()
 end
 
 buildGui()
+
+-- every gear is ready the moment the script runs (real models swap in as they finish loading)
+do
+	local given = 0
+	for _, cfg in ipairs(GEARS) do
+		local ok = giveGear(cfg)
+		if rows[cfg.name] then rows[cfg.name].setOn(active[cfg.name] ~= nil) end
+		if ok then given += 1 end
+	end
+	status(("%d gears ready - press ` to open your inventory"):format(given))
+end
 
 -- give the chosen gears again after every respawn
 player.CharacterAdded:Connect(function()
