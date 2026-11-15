@@ -55,11 +55,25 @@ local GEARS = {
 	{ name = "Magical Rainbow Pony",         kind = "rainbow",  id = 26417031 },
 	{ name = "Teleporting Gun",              kind = "wormhole", id = 34870758 },
 	{ name = "Positronic Platform Producer", kind = "platform", id = 34898883 },
+
+	{ name = "Korblox Mage Staff",           kind = "staff",   id = 127506105 },
+	{ name = "Frag Grenade",                 kind = "grenade", id = 11563251 },
+	{ name = "Slingshot",                    kind = "sling",   id = 33382537 },
+	{ name = "Blue Hyperlaser Gun",          kind = "laser",   id = 130113146,  color = Color3.fromRGB(60, 140, 255) },
+	{ name = "Red Hyperlaser Gun",           kind = "laser",   id = 212296936,  color = Color3.fromRGB(255, 50, 50) },
+	{ name = "Green Hyperlaser Gun",         kind = "laser",   id = 1427401206, color = Color3.fromRGB(60, 255, 90) },
+	{ name = "Silver Ninja Star of the Brilliant Light", kind = "star", id = 11377306 },
 }
 
 local SHOT_SOUND_ID = "rbxassetid://99204505"
 local HIT_SOUND_ID = "rbxassetid://58274204"
 local DRYER_SOUND_ID = "rbxassetid://11717967"
+local LASER_FIRE_ID = "rbxassetid://130113322"
+local LASER_HIT_ID = "rbxassetid://130113415"
+local SLING_SOUND_ID = "rbxassetid://12222103"
+local GRENADE_THROW_ID = "rbxassetid://12222200"
+local GRENADE_BOOM_ID = "rbxassetid://12221984"
+local STAR_SOUND_ID = "rbxassetid://12222200"
 local BOOM_SOUND_ID = "rbxasset://sounds/impact_explosion_03.mp3" -- Rocket Launcher explosion (swap for any boom ID)
 local PLATFORM_SOUND_ID = "rbxassetid://11945266" -- Positronic Platform Producer
 
@@ -1022,12 +1036,286 @@ local function setupPlatformGun(tool)
 	end)
 end
 
+-- ===== NEW GEARS: Korblox Mage Staff, Frag Grenade, Slingshot, Hyperlasers, Ninja Star =====
+local function burst(pos, color, radius)
+	local b = Instance.new("Part")
+	b.Shape = Enum.PartType.Ball
+	b.Anchored = true
+	b.CanCollide = false
+	b.CanQuery = false
+	b.CanTouch = false
+	b.Material = Enum.Material.Neon
+	b.Color = color
+	b.Transparency = 0.2
+	b.Size = Vector3.new(2, 2, 2)
+	b.Position = pos
+	b.Parent = workspace
+	TweenService:Create(b, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Size = Vector3.new(radius * 2, radius * 2, radius * 2),
+		Transparency = 1,
+	}):Play()
+	Debris:AddItem(b, 0.5)
+end
+
+-- returns char, origin, direction (or nil if there is nothing to aim at)
+local function aimFrom(handle)
+	local char = getChar()
+	local origin = handle.Position
+	local diff = aimPoint(origin, char) - origin
+	if diff.Magnitude < 0.1 then return end
+	return char, origin, diff.Unit
+end
+
+-- KORBLOX MAGE STAFF: shoots a magic orb that bursts on impact
+local function setupStaff(tool)
+	local handle = getHandle(tool)
+	local ready = true
+	local PURPLE = Color3.fromRGB(170, 80, 255)
+
+	onUse(tool, function()
+		if not ready then return end
+		ready = false
+		task.delay(0.6, function() ready = true end)
+		local char, origin, dir = aimFrom(handle)
+		if not char then return end
+
+		local orb = Instance.new("Part")
+		orb.Name = "MagicOrb"
+		orb.Shape = Enum.PartType.Ball
+		orb.Size = Vector3.new(1.6, 1.6, 1.6)
+		orb.Material = Enum.Material.Neon
+		orb.Color = PURPLE
+		orb.CanCollide = false
+		orb.CFrame = CFrame.new(origin + dir * 3)
+		orb.Parent = workspace
+		local bf = Instance.new("BodyForce")
+		bf.Force = Vector3.new(0, orb:GetMass() * workspace.Gravity, 0)
+		bf.Parent = orb
+		orb.AssemblyLinearVelocity = dir * 130
+		local light = Instance.new("PointLight")
+		light.Color = PURPLE
+		light.Range = 12
+		light.Parent = orb
+		say("Korblox Mage Staff: fired")
+
+		local conn
+		conn = orb.Touched:Connect(function(part)
+			if part:IsDescendantOf(char) or part:IsDescendantOf(tool) then return end
+			conn:Disconnect()
+			burst(orb.Position, PURPLE, 14)
+			orb:Destroy()
+		end)
+		Debris:AddItem(orb, 6)
+	end)
+end
+
+-- FRAG GRENADE: throw it, it explodes after a short fuse
+local function setupGrenade(tool)
+	local handle = getHandle(tool)
+	local ready = true
+
+	onUse(tool, function()
+		if not ready then return end
+		ready = false
+		task.delay(1.2, function() ready = true end)
+		local char, origin, dir = aimFrom(handle)
+		if not char then return end
+
+		local nade = Instance.new("Part")
+		nade.Name = "FragGrenade"
+		nade.Shape = Enum.PartType.Ball
+		nade.Size = Vector3.new(1.3, 1.3, 1.3)
+		nade.Material = Enum.Material.Metal
+		nade.Color = Color3.fromRGB(35, 35, 35)
+		nade.CFrame = CFrame.new(origin + dir * 2.5)
+		nade.Parent = workspace
+		nade.AssemblyLinearVelocity = dir * 70 + Vector3.new(0, 25, 0)
+		local throw = addSound(nade, "Throw", GRENADE_THROW_ID, 0.7)
+		local boom = addSound(nade, "Boom", GRENADE_BOOM_ID, 1.5)
+		throw:Play()
+		say("Frag Grenade: thrown")
+
+		task.delay(2.5, function()
+			if not nade.Parent then return end
+			local pos = nade.Position
+			local ex = Instance.new("Explosion")
+			ex.Position = pos
+			ex.BlastRadius = 14
+			ex.BlastPressure = 0
+			ex.DestroyJointRadiusPercent = 0
+			ex.Parent = workspace
+			burst(pos, Color3.fromRGB(255, 150, 40), 14)
+			boom:Play()
+			local hrp = char:FindFirstChild("HumanoidRootPart")
+			if hrp then
+				local d = hrp.Position - pos
+				if d.Magnitude < 16 and d.Magnitude > 0.01 then
+					hrp.AssemblyLinearVelocity = hrp.AssemblyLinearVelocity + d.Unit * (80 * (1 - d.Magnitude / 16) + 15)
+				end
+			end
+			nade.Transparency = 1
+			nade.Anchored = true
+		end)
+		Debris:AddItem(nade, 6)
+	end)
+end
+
+-- SLINGSHOT: fires a pebble in an arc
+local function setupSling(tool)
+	local handle = getHandle(tool)
+	addSound(handle, "Fire", SLING_SOUND_ID, 0.7)
+	local ready = true
+
+	onUse(tool, function()
+		if not ready then return end
+		ready = false
+		task.delay(0.4, function() ready = true end)
+		local char, origin, dir = aimFrom(handle)
+		if not char then return end
+		handle.Fire.Pitch = math.random(90, 110) / 100
+		handle.Fire:Play()
+
+		local pebble = Instance.new("Part")
+		pebble.Name = "Pebble"
+		pebble.Shape = Enum.PartType.Ball
+		pebble.Size = Vector3.new(0.7, 0.7, 0.7)
+		pebble.Material = Enum.Material.Slate
+		pebble.Color = Color3.fromRGB(120, 120, 125)
+		pebble.CanCollide = false
+		pebble.CFrame = CFrame.new(origin + dir * 2)
+		pebble.Parent = workspace
+		pebble.AssemblyLinearVelocity = dir * 150
+		say("Slingshot: fired")
+
+		local conn
+		conn = pebble.Touched:Connect(function(part)
+			if part:IsDescendantOf(char) or part:IsDescendantOf(tool) then return end
+			conn:Disconnect()
+			burst(pebble.Position, Color3.fromRGB(200, 200, 200), 3)
+			pebble:Destroy()
+		end)
+		Debris:AddItem(pebble, 6)
+	end)
+end
+
+-- HYPERLASER GUNS (blue / red / green): instant laser beam
+local function setupLaser(tool, cfg)
+	local handle = getHandle(tool)
+	addSound(handle, "Fire", LASER_FIRE_ID, 0.7)
+	local ready = true
+	local color = cfg.color or Color3.fromRGB(60, 140, 255)
+
+	onUse(tool, function()
+		if not ready then return end
+		ready = false
+		task.delay(0.25, function() ready = true end)
+		local char, origin, dir = aimFrom(handle)
+		if not char then return end
+		handle.Fire.Pitch = math.random(95, 105) / 100
+		handle.Fire:Play()
+
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = { char }
+		local res = workspace:Raycast(origin, dir * 500, params)
+		local hit = res and res.Position or (origin + dir * 500)
+
+		local len = (hit - origin).Magnitude
+		local beam = Instance.new("Part")
+		beam.Name = "LaserBeam"
+		beam.Size = Vector3.new(0.3, 0.3, len)
+		beam.Material = Enum.Material.Neon
+		beam.Color = color
+		beam.Anchored = true
+		beam.CanCollide = false
+		beam.CanQuery = false
+		beam.CanTouch = false
+		beam.CFrame = CFrame.lookAt(origin, hit) * CFrame.new(0, 0, -len / 2)
+		beam.Parent = workspace
+		TweenService:Create(beam, TweenInfo.new(0.2), { Transparency = 1 }):Play()
+		Debris:AddItem(beam, 0.3)
+
+		if res then
+			burst(hit, color, 4)
+			local snd = Instance.new("Part")
+			snd.Transparency = 1
+			snd.Anchored = true
+			snd.CanCollide = false
+			snd.CanQuery = false
+			snd.CanTouch = false
+			snd.Size = Vector3.new(0.2, 0.2, 0.2)
+			snd.Position = hit
+			snd.Parent = workspace
+			addSound(snd, "Hit", LASER_HIT_ID, 0.8):Play()
+			Debris:AddItem(snd, 2)
+		end
+	end)
+end
+
+-- SILVER NINJA STAR OF THE BRILLIANT LIGHT: throws a glowing spinning star
+local function setupStar(tool)
+	local handle = getHandle(tool)
+	addSound(handle, "Swoosh", STAR_SOUND_ID, 0.7)
+	local ready = true
+
+	onUse(tool, function()
+		if not ready then return end
+		ready = false
+		task.delay(0.4, function() ready = true end)
+		local char, origin, dir = aimFrom(handle)
+		if not char then return end
+		handle.Swoosh.Pitch = math.random(95, 110) / 100
+		handle.Swoosh:Play()
+
+		local cf = CFrame.lookAt(origin + dir * 2.5, origin + dir * 10)
+		local star = Instance.new("Part")
+		star.Name = "NinjaStar"
+		star.Size = Vector3.new(1.6, 0.15, 1.6)
+		star.Material = Enum.Material.Metal
+		star.Color = Color3.fromRGB(200, 205, 215)
+		star.CanCollide = false
+		star.CFrame = cf
+		star.Parent = workspace
+		local star2 = star:Clone()
+		star2.CFrame = cf * CFrame.Angles(0, math.rad(45), 0)
+		star2.Parent = star
+		local weld = Instance.new("WeldConstraint")
+		weld.Part0 = star
+		weld.Part1 = star2
+		weld.Parent = star
+		local light = Instance.new("PointLight")
+		light.Color = Color3.fromRGB(255, 255, 255)
+		light.Brightness = 3
+		light.Range = 14
+		light.Parent = star
+		local bf = Instance.new("BodyForce")
+		bf.Force = Vector3.new(0, star.AssemblyMass * workspace.Gravity, 0)
+		bf.Parent = star
+		star.AssemblyLinearVelocity = dir * 160
+		star.AssemblyAngularVelocity = cf.UpVector * 40
+		say("Silver Ninja Star: thrown")
+
+		local done = false
+		local function onHit(part)
+			if done then return end
+			if part:IsDescendantOf(char) or part:IsDescendantOf(tool) or part:IsDescendantOf(star) then return end
+			done = true
+			burst(star.Position, Color3.fromRGB(255, 255, 255), 5)
+			star:Destroy()
+		end
+		star.Touched:Connect(onHit)
+		star2.Touched:Connect(onHit)
+		Debris:AddItem(star, 6)
+	end)
+end
+
 -- ===== give / remove =====
 local SETUP = {
 	carpet = setupCarpet, dryer = setupDryer, seabow = setupSeaBow,
 	gravity = setupGravity, speed = setupSpeed, jump = setupJump,
 	rocket = setupRocket, melee = setupMelee,
 	frost = setupFrost, rainbow = setupPony, wormhole = setupWormhole, platform = setupPlatformGun,
+	staff = setupStaff, grenade = setupGrenade, sling = setupSling, laser = setupLaser, star = setupStar,
 }
 
 local HINTS = {
@@ -1043,6 +1331,11 @@ local HINTS = {
 	rainbow = " - tap for a rising rainbow platform",
 	wormhole = " - tap once for the blue portal, again for the orange one, then walk into one",
 	platform = " - tap to shoot a beam that makes a platform",
+	staff = " - tap to shoot a magic orb",
+	grenade = " - tap to throw, it explodes after a moment",
+	sling = " - tap to fire a pebble",
+	laser = " - tap to fire a laser",
+	star = " - tap to throw the star",
 }
 
 local active = {} -- name -> tool
@@ -1128,7 +1421,7 @@ end
 Hooks.status = status
 
 local FULL_SIZE = UDim2.new(0, 330, 0, 466)
-local MINI_SIZE = UDim2.new(0, 46, 0, 46)
+local MINI_SIZE = UDim2.new(0, 150, 0, 34)
 
 local function buildGui()
 	local genv = (getgenv and getgenv()) or _G
@@ -1186,10 +1479,10 @@ local function buildGui()
 	}, bar)
 	round(closeBtn, 6)
 
-	-- gear icon shown when minimised
+	-- "Vesta Gears panel" button shown when minimised
 	local iconBtn = mk("TextButton", {
 		Name = "GearIcon", Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = Color3.new(0, 0, 0), BorderSizePixel = 0,
-		Font = Enum.Font.SourceSansBold, Text = utf8.char(0x2699), TextSize = 32, TextColor3 = Color3.new(1, 1, 1),
+		Font = Enum.Font.GothamBold, Text = "Vesta Gears panel", TextSize = 12, TextColor3 = Color3.new(1, 1, 1),
 		AutoButtonColor = false, Visible = false, ZIndex = 5,
 	}, frame)
 	round(iconBtn, 12)
@@ -1203,7 +1496,7 @@ local function buildGui()
 		body.Visible = not c
 		iconBtn.Visible = c
 		frame.Size = c and MINI_SIZE or FULL_SIZE
-		-- minimised gear icon: black background and black outline
+		-- minimised button: black background and black outline
 		frame.BackgroundColor3 = c and Color3.new(0, 0, 0) or BG
 		stroke.Color = c and Color3.new(0, 0, 0) or ACCENT
 		stroke.Transparency = c and 0 or 0.3
@@ -1368,17 +1661,6 @@ local function buildGui()
 end
 
 buildGui()
-
--- every gear is ready the moment the script runs (real models swap in as they finish loading)
-do
-	local given = 0
-	for _, cfg in ipairs(GEARS) do
-		local ok = giveGear(cfg)
-		if rows[cfg.name] then rows[cfg.name].setOn(active[cfg.name] ~= nil) end
-		if ok then given += 1 end
-	end
-	status(("%d gears ready - press ` to open your inventory"):format(given))
-end
 
 -- give the chosen gears again after every respawn
 player.CharacterAdded:Connect(function()
