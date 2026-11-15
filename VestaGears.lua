@@ -60,7 +60,7 @@ local GEARS = {
 local SHOT_SOUND_ID = "rbxassetid://99204505"
 local HIT_SOUND_ID = "rbxassetid://58274204"
 local DRYER_SOUND_ID = "rbxassetid://11717967"
-local ROCKET_SOUND_ID = "rbxassetid://12222095"   -- Rocket Launcher
+local BOOM_SOUND_ID = "rbxasset://sounds/impact_explosion_03.mp3" -- Rocket Launcher explosion (swap for any boom ID)
 local PLATFORM_SOUND_ID = "rbxassetid://11945266" -- Positronic Platform Producer
 
 -- ===== helpers =====
@@ -585,38 +585,43 @@ local function setupDryer(tool)
 		end)
 	end
 
-	tool.Activated:Connect(startBlowing)
-	tool.Deactivated:Connect(stopBlowing)
-	tool.Unequipped:Connect(stopBlowing)
-	tool.Destroying:Connect(stopBlowing)
-
-	-- hold click / hold tap (original behaviour): works on PC and mobile
+	-- Hold click (PC) or hold a finger on the RIGHT side of the screen (phone, camera drag works too).
+	-- Touches on the left side are the joystick, so they are ignored.
+	local pressInput
 	local function isPress(i)
 		return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch
 	end
 	local c1 = UserInputService.InputBegan:Connect(function(i, processed)
 		if processed or not isPress(i) then return end
-		if tool.Parent and tool.Parent == player.Character then startBlowing() end
+		if i.UserInputType == Enum.UserInputType.Touch then
+			local cam = workspace.CurrentCamera
+			if cam and i.Position.X < cam.ViewportSize.X * 0.4 then return end -- joystick area
+		end
+		if tool.Parent and tool.Parent == player.Character then
+			pressInput = i
+			startBlowing()
+		end
 	end)
 	local c2 = UserInputService.InputEnded:Connect(function(i)
-		if isPress(i) then stopBlowing() end
+		if i == pressInput then
+			pressInput = nil
+			stopBlowing()
+		end
 	end)
 	tool.Destroying:Connect(function() c1:Disconnect() c2:Disconnect() end)
+	tool.Unequipped:Connect(stopBlowing)
+	tool.Destroying:Connect(stopBlowing)
 end
 
 -- ===== ROCKET LAUNCHER =====
 local function setupRocket(tool)
 	local handle = getHandle(tool)
 	local ready = true
-	addSound(handle, "Shot", ROCKET_SOUND_ID, 0.6)
 
 	onUse(tool, function()
 		if not ready then return end
 		ready = false
 		local char = getChar()
-		handle.Shot.Pitch = math.random(90, 110) / 100
-		handle.Shot:Play()
-
 		local rocket = Instance.new("Part")
 		rocket.Name = "Rocket"
 		rocket.Size = Vector3.new(0.6, 0.6, 3)
@@ -633,7 +638,7 @@ local function setupRocket(tool)
 		local fire = Instance.new("Fire")
 		fire.Size = 5
 		fire.Parent = rocket
-		addSound(rocket, "Hit", HIT_SOUND_ID, 1)
+		addSound(rocket, "Hit", BOOM_SOUND_ID, 1.5)
 
 		local conn
 		conn = rocket.Touched:Connect(function(part)
@@ -1027,7 +1032,7 @@ local SETUP = {
 
 local HINTS = {
 	carpet = " - move to fly toward the camera, Space = up",
-	dryer = " - hold click/tap to blow",
+	dryer = " - hold click, or hold a finger on the right side of the screen",
 	seabow = " - tap to shoot",
 	rocket = " - tap to fire",
 	gravity = " - low gravity is on",
@@ -1122,7 +1127,7 @@ local function status(msg)
 end
 Hooks.status = status
 
-local FULL_SIZE = UDim2.new(0, 330, 0, 440)
+local FULL_SIZE = UDim2.new(0, 330, 0, 466)
 local MINI_SIZE = UDim2.new(0, 46, 0, 46)
 
 local function buildGui()
@@ -1151,13 +1156,13 @@ local function buildGui()
 		mk("UICorner", { CornerRadius = UDim.new(0, r or 8) }, o)
 	end
 
-	local BG = Color3.fromRGB(14, 14, 20)
-	local PANEL = Color3.fromRGB(26, 26, 38)
+	local BG = Color3.fromRGB(0, 0, 0)
+	local PANEL = Color3.fromRGB(18, 18, 18)
 	local ACCENT = Color3.fromRGB(120, 90, 230)
-	local OFF = Color3.fromRGB(46, 46, 64)
+	local OFF = Color3.fromRGB(40, 40, 40)
 
 	local frame = mk("Frame", {
-		Name = "Main", Size = FULL_SIZE, Position = UDim2.new(0.5, -165, 0.5, -220),
+		Name = "Main", Size = FULL_SIZE, Position = UDim2.new(0.5, -165, 0.5, -233),
 		BackgroundColor3 = BG, BorderSizePixel = 0, Active = true,
 	}, gui)
 	round(frame, 12)
@@ -1204,13 +1209,16 @@ local function buildGui()
 		stroke.Transparency = c and 0 or 0.3
 	end
 
-	-- dragging (title bar and gear icon). A tap on the icon without moving opens the menu.
-	local dragging, dragStart, startPos, moved, dragSource
+	-- dragging (title bar and gear icon). Only the finger/mouse that started the drag moves the menu,
+	-- so the joystick or another finger can never move it. A tap on the icon opens the menu.
+	local dragging, dragInput, dragStart, startPos, moved, dragSource
 	local function beginDrag(src)
 		src.InputBegan:Connect(function(input)
+			if dragging then return end
 			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 				dragging = true
 				moved = false
+				dragInput = input
 				dragSource = src
 				dragStart = input.Position
 				startPos = frame.Position
@@ -1220,19 +1228,30 @@ local function buildGui()
 	beginDrag(bar)
 	beginDrag(iconBtn)
 	UserInputService.InputChanged:Connect(function(input)
-		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-			local d = input.Position - dragStart
-			if d.Magnitude > 4 then moved = true end
-			frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+		if not dragging then return end
+		if dragInput.UserInputType == Enum.UserInputType.Touch then
+			if input ~= dragInput then return end
+		elseif input.UserInputType ~= Enum.UserInputType.MouseMovement then
+			return
 		end
+		local d = input.Position - dragStart
+		if d.Magnitude > 4 then moved = true end
+		frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
 	end)
 	UserInputService.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			if dragging and not moved and dragSource == iconBtn and collapsed then
-				setCollapsed(false)
-			end
-			dragging = false
+		if not dragging then return end
+		local ends
+		if dragInput.UserInputType == Enum.UserInputType.Touch then
+			ends = (input == dragInput)
+		else
+			ends = (input.UserInputType == Enum.UserInputType.MouseButton1)
 		end
+		if not ends then return end
+		if not moved and dragSource == iconBtn and collapsed then
+			setCollapsed(false)
+		end
+		dragging = false
+		dragInput = nil
 	end)
 
 	local search = mk("TextBox", {
@@ -1245,7 +1264,7 @@ local function buildGui()
 	mk("UIPadding", { PaddingLeft = UDim.new(0, 10) }, search)
 
 	local list = mk("ScrollingFrame", {
-		Size = UDim2.new(1, -16, 1, -128), Position = UDim2.new(0, 8, 0, 44), BackgroundTransparency = 1,
+		Size = UDim2.new(1, -16, 1, -146), Position = UDim2.new(0, 8, 0, 44), BackgroundTransparency = 1,
 		BorderSizePixel = 0, ScrollBarThickness = 4, CanvasSize = UDim2.new(0, 0, 0, 0),
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 	}, body)
@@ -1294,7 +1313,7 @@ local function buildGui()
 
 	local function footerButton(text, x, color)
 		local b = mk("TextButton", {
-			Size = UDim2.new(0.5, -12, 0, 28), Position = UDim2.new(x, x == 0 and 8 or 4, 1, -76), BackgroundColor3 = color,
+			Size = UDim2.new(0.5, -12, 0, 28), Position = UDim2.new(x, x == 0 and 8 or 4, 1, -92), BackgroundColor3 = color,
 			Font = Enum.Font.GothamBold, Text = text, TextSize = 12, TextColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
 		}, body)
 		round(b, 8)
@@ -1304,10 +1323,16 @@ local function buildGui()
 	local removeAllBtn = footerButton("REMOVE ALL", 0.5, Color3.fromRGB(125, 30, 30))
 
 	statusLabel = mk("TextLabel", {
-		Size = UDim2.new(1, -16, 0, 32), Position = UDim2.new(0, 8, 1, -40), BackgroundTransparency = 1,
+		Size = UDim2.new(1, -16, 0, 32), Position = UDim2.new(0, 8, 1, -58), BackgroundTransparency = 1,
 		Font = Enum.Font.Gotham, Text = "Pick a gear. Hotbar shows 10, press ` for the full inventory.", TextSize = 11,
 		TextColor3 = Color3.fromRGB(190, 190, 210), TextWrapped = true,
 		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+	}, body)
+
+	mk("TextLabel", {
+		Size = UDim2.new(1, -16, 0, 16), Position = UDim2.new(0, 8, 1, -20), BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium, Text = "Made by FearVesta", TextSize = 11,
+		TextColor3 = Color3.fromRGB(150, 150, 170),
 	}, body)
 
 	giveAllBtn.MouseButton1Click:Connect(function()
