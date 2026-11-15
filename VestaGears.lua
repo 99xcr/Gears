@@ -16,6 +16,11 @@ local mouse = player:GetMouse()
 
 -- kind: carpet (fly) / speed / gravity / jump / melee / dryer / seabow / rocket
 -- feet = true -> gear is placed under your feet and your arm does NOT stick out
+-- Inventory/hotbar icon for the Dual Speed Coil (your two red coils picture).
+-- Roblox needs the picture uploaded first: upload it at create.roblox.com as an Image, then paste its ID here,
+-- for example "rbxassetid://123456789". Leave it empty to keep the normal coil icon.
+local DUAL_COIL_ICON = ""
+
 local GEARS = {
 	{ name = "Rainbow Carpet",     kind = "carpet", id = 225921000,  speed = 90,  color = "rainbow", trail = "rainbow" },
 	{ name = "Gold Carpet",        kind = "carpet", id = 1016183873, speed = 70,  color = Color3.fromRGB(255, 200, 40),
@@ -28,7 +33,7 @@ local GEARS = {
 	{ name = "Speed Coil",         kind = "speed",  id = 99119158, speed = 40 },
 	{ name = "Rocket Launcher",    kind = "rocket", id = 32356064 },
 
-	{ name = "Dual Speed Coil",    kind = "speed",  id = 99119158, speed = 110, dual = true },
+	{ name = "Dual Speed Coil",    kind = "speed",  id = 99119158, speed = 110, dual = true, icon = DUAL_COIL_ICON },
 	{ name = "Dual Gravity Coil",  kind = "gravity", id = 150366274, lift = 0.875 },
 
 	{ name = "Flying Magic Carpet",          kind = "carpet", id = 71037028,  speed = 80 },
@@ -41,7 +46,7 @@ local GEARS = {
 	{ name = "Zoom Broom 5000",              kind = "carpet", id = 511930668, speed = 130 },
 	{ name = "Ghost Ride",                   kind = "carpet", id = 179369627, speed = 90 },
 
-	{ name = "Spring-loaded Jumping Stilts", kind = "jump", id = 226206639, power = 130, feet = true },
+	{ name = "Spring-loaded Jumping Stilts", kind = "jump", id = 226206639, power = 130 },
 	{ name = "Vaulting Pole",                kind = "jump", id = 88143166,  power = 140 },
 
 	{ name = "Bug Juice",                    kind = "speed", id = 57229313, speed = 60 },
@@ -112,14 +117,10 @@ local function aimPoint(origin, ignore)
 	return mouse.Hit.Position
 end
 
+-- only the tool's own Activated event is used: Roblox fires it for a real tap/click on the gear,
+-- not when you drag the camera or use the joystick on mobile
 local function onUse(tool, fn)
 	tool.Activated:Connect(fn)
-	local conn = UserInputService.InputBegan:Connect(function(i, processed)
-		if processed then return end
-		if i.UserInputType ~= Enum.UserInputType.MouseButton1 and i.UserInputType ~= Enum.UserInputType.Touch then return end
-		if tool.Parent and tool.Parent == player.Character then fn() end
-	end)
-	tool.Destroying:Connect(function() conn:Disconnect() end)
 end
 
 -- ===== loading: models are preloaded in the background, giving a gear never waits =====
@@ -203,6 +204,7 @@ local function loadTool(cfg)
 	tool.Name = cfg.name
 	tool.CanBeDropped = false
 	tool.Enabled = true
+	if cfg.icon and cfg.icon ~= "" then tool.TextureId = cfg.icon end
 	if not getHandle(tool) then
 		local h = Instance.new("Part")
 		h.Name = "Handle"
@@ -587,17 +589,6 @@ local function setupDryer(tool)
 	tool.Unequipped:Connect(stopBlowing)
 	tool.Destroying:Connect(stopBlowing)
 
-	local function isPress(i)
-		return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch
-	end
-	local c1 = UserInputService.InputBegan:Connect(function(i, processed)
-		if processed or not isPress(i) then return end
-		if tool.Parent and tool.Parent == player.Character then startBlowing() end
-	end)
-	local c2 = UserInputService.InputEnded:Connect(function(i)
-		if isPress(i) then stopBlowing() end
-	end)
-	tool.Destroying:Connect(function() c1:Disconnect() c2:Disconnect() end)
 end
 
 -- ===== ROCKET LAUNCHER =====
@@ -747,43 +738,65 @@ end
 -- ===== FROST POTION: a solid block of ice around you =====
 local function setupFrost(tool)
 	local ready = true
+	local current
+	local LIFE = 8
+
+	local function shatter()
+		if current then current:Destroy() current = nil end
+	end
+
 	onUse(tool, function()
 		if not ready then return end
 		ready = false
-		task.delay(2, function() ready = true end)
+		task.delay(0.6, function() ready = true end)
+
+		-- tap again while frozen to break out
+		if current and current.Parent then
+			shatter()
+			say("Frost Potion: ice shattered")
+			return
+		end
+
 		local char = getChar()
 		local hrp = char:FindFirstChild("HumanoidRootPart")
 		if not hrp then return end
+		local c = hrp.Position
 
-		local ice = Instance.new("Part")
-		ice.Name = "FrostBlock"
-		ice.Size = Vector3.new(7, 8, 7)
-		ice.Material = Enum.Material.Ice
-		ice.Color = Color3.fromRGB(150, 215, 255)
-		ice.Transparency = 0.35
-		ice.Anchored = true
-		ice.CanCollide = true
-		ice.CFrame = CFrame.new(hrp.Position)
-		-- you stand inside the ice, it never pushes you; everything else treats it as solid
-		for _, p in ipairs(char:GetDescendants()) do
-			if p:IsA("BasePart") then
-				local nc = Instance.new("NoCollisionConstraint")
-				nc.Part0 = ice
-				nc.Part1 = p
-				nc.Parent = ice
-			end
+		-- hollow solid ice block: it collides with you, you stand inside it
+		local model = Instance.new("Model")
+		model.Name = "FrostBlock"
+		local function wall(size, offset)
+			local p = Instance.new("Part")
+			p.Size = size
+			p.Material = Enum.Material.Ice
+			p.Color = Color3.fromRGB(150, 215, 255)
+			p.Transparency = 0.35
+			p.Anchored = true
+			p.CanCollide = true
+			p.CFrame = CFrame.new(c + offset)
+			p.Parent = model
 		end
-		ice.Parent = workspace
-		say("Frost Potion: you are frozen in ice")
+		wall(Vector3.new(7, 1, 7), Vector3.new(0, -3.7, 0))   -- floor
+		wall(Vector3.new(7, 1, 7), Vector3.new(0, 3.7, 0))    -- ceiling
+		wall(Vector3.new(1, 8.4, 7), Vector3.new(3, 0, 0))    -- sides
+		wall(Vector3.new(1, 8.4, 7), Vector3.new(-3, 0, 0))
+		wall(Vector3.new(5, 8.4, 1), Vector3.new(0, 0, 3))
+		wall(Vector3.new(5, 8.4, 1), Vector3.new(0, 0, -3))
+		model.Parent = workspace
+		current = model
+		say("Frost Potion: you are frozen in ice (tap again to break out)")
 
-		task.delay(10, function()
-			if not ice.Parent then return end
-			local tw = TweenService:Create(ice, TweenInfo.new(1), { Transparency = 1 })
-			tw:Play()
-			tw.Completed:Wait()
-			ice:Destroy()
+		task.delay(LIFE, function()
+			if current ~= model or not model.Parent then return end
+			for _, p in ipairs(model:GetChildren()) do
+				TweenService:Create(p, TweenInfo.new(1), { Transparency = 1 }):Play()
+			end
+			task.wait(1)
+			if current == model then shatter() end
 		end)
 	end)
+
+	tool.Destroying:Connect(shatter)
 end
 
 -- ===== MAGICAL RAINBOW PONY: rising rainbow platform under your feet =====
