@@ -118,11 +118,21 @@ local function say(msg)
 	if Hooks.status then Hooks.status(msg) end
 end
 
+-- phone: shots go exactly where you tap on the screen (no shiftlock / screen-centre aiming)
+local lastTouch
+UserInputService.InputBegan:Connect(function(i)
+	if i.UserInputType == Enum.UserInputType.Touch then lastTouch = i.Position end
+end)
+UserInputService.TouchTap:Connect(function(positions)
+	if positions and positions[1] then lastTouch = positions[1] end
+end)
+
 local function aimPoint(origin, ignore)
 	if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then
 		local cam = workspace.CurrentCamera
 		local vp = cam.ViewportSize
-		local ray = cam:ViewportPointToRay(vp.X / 2, vp.Y / 2)
+		local p = lastTouch or Vector2.new(vp.X / 2, vp.Y / 2)
+		local ray = cam:ViewportPointToRay(p.X, p.Y)
 		local params = RaycastParams.new()
 		params.FilterType = Enum.RaycastFilterType.Exclude
 		params.FilterDescendantsInstances = { ignore }
