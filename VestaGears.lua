@@ -38,7 +38,6 @@ local GEARS = {
 
 	{ name = "Flying Magic Carpet",          kind = "carpet", id = 71037028,  speed = 80 },
 	{ name = "Sinister Flying Magic Carpet", kind = "carpet", id = 103235041, speed = 100 },
-	{ name = "Deluxe Rainbow Magic Carpet",  kind = "carpet", id = 477910063, speed = 100, trail = "rainbow" },
 	{ name = "Flying Vacuum",                kind = "carpet", id = 313547087, speed = 85 },
 	{ name = "Flying Reindeer",              kind = "carpet", id = 330296266, speed = 85 },
 	{ name = "Broom",                        kind = "carpet", id = 36913601,  speed = 80 },
@@ -61,6 +60,8 @@ local GEARS = {
 local SHOT_SOUND_ID = "rbxassetid://99204505"
 local HIT_SOUND_ID = "rbxassetid://58274204"
 local DRYER_SOUND_ID = "rbxassetid://11717967"
+local ROCKET_SOUND_ID = "rbxassetid://12222095"   -- Rocket Launcher
+local PLATFORM_SOUND_ID = "rbxassetid://11945266" -- Positronic Platform Producer
 
 -- ===== helpers =====
 local function getChar()
@@ -589,13 +590,25 @@ local function setupDryer(tool)
 	tool.Unequipped:Connect(stopBlowing)
 	tool.Destroying:Connect(stopBlowing)
 
+	-- hold click / hold tap (original behaviour): works on PC and mobile
+	local function isPress(i)
+		return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch
+	end
+	local c1 = UserInputService.InputBegan:Connect(function(i, processed)
+		if processed or not isPress(i) then return end
+		if tool.Parent and tool.Parent == player.Character then startBlowing() end
+	end)
+	local c2 = UserInputService.InputEnded:Connect(function(i)
+		if isPress(i) then stopBlowing() end
+	end)
+	tool.Destroying:Connect(function() c1:Disconnect() c2:Disconnect() end)
 end
 
 -- ===== ROCKET LAUNCHER =====
 local function setupRocket(tool)
 	local handle = getHandle(tool)
 	local ready = true
-	addSound(handle, "Shot", SHOT_SOUND_ID, 0.6)
+	addSound(handle, "Shot", ROCKET_SOUND_ID, 0.6)
 
 	onUse(tool, function()
 		if not ready then return end
@@ -843,6 +856,7 @@ end
 -- ===== TELEPORTING GUN: shoot two linked portals, walk into one to come out the other =====
 local function setupWormhole(tool)
 	local handle = getHandle(tool)
+	addSound(handle, "Shot", PLATFORM_SOUND_ID, 0.6)
 	local ready = true
 	local portals = {}
 	local nextIdx = 1
@@ -862,6 +876,8 @@ local function setupWormhole(tool)
 		local aim = aimPoint(origin, char)
 		local diff = aim - origin
 		if diff.Magnitude < 0.1 then return end
+		handle.Shot.Pitch = math.random(90, 110) / 100
+		handle.Shot:Play()
 		local params = RaycastParams.new()
 		params.FilterType = Enum.RaycastFilterType.Exclude
 		params.FilterDescendantsInstances = { char }
@@ -931,7 +947,7 @@ end
 -- ===== POSITRONIC PLATFORM PRODUCER: beams that make temporary solid platforms =====
 local function setupPlatformGun(tool)
 	local handle = getHandle(tool)
-	addSound(handle, "Shot", SHOT_SOUND_ID, 0.5)
+	addSound(handle, "Shot", PLATFORM_SOUND_ID, 0.6)
 	local ready = true
 
 	onUse(tool, function()
