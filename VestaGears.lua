@@ -1,11 +1,14 @@
--- Vesta Gears (v3)
+-- Vesta Gears (v4)
 -- Real gears are preloaded in the background, so GIVE is instant and never lags.
--- If a model hasn't loaded yet, a built-in model is given at once and swapped for the real one when it arrives.
+-- If a model is still loading when you press GIVE, it waits a moment for the real one (no placeholder swap, so no flicker).
 -- Menu: drag the title bar, "-" turns the menu into a gear icon (click the icon to open it again),
 -- "X" closes the menu (gears stay), RightShift hides/shows.
--- Only the first 10 gears show on the hotbar. Press ` (backtick) to open the full inventory and see the rest.
+-- Given gears go into your normal Roblox inventory / hotbar.
+
+if not game:IsLoaded() then game.Loaded:Wait() end
 
 local Players = game:GetService("Players")
+local StarterGui = game:GetService("StarterGui")
 local Debris = game:GetService("Debris")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
@@ -127,11 +130,24 @@ UserInputService.TouchTap:Connect(function(positions)
 	if positions and positions[1] then lastTouch = positions[1] end
 end)
 
+-- true while shiftlock (or any centre-locked camera) is on
+local function isShiftLock()
+	if UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter then return true end
+	local ok, rt = pcall(function()
+		return UserSettings():GetService("UserGameSettings").RotationType
+	end)
+	return ok and rt == Enum.RotationType.CameraRelative
+end
+
+-- shiftlock on: shoot where the shiftlock crosshair (screen centre) points
+-- shiftlock off: shoot wherever you tap / click
 local function aimPoint(origin, ignore)
-	if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then
+	local shiftlock = isShiftLock()
+	if shiftlock or (UserInputService.TouchEnabled and not UserInputService.MouseEnabled) then
 		local cam = workspace.CurrentCamera
 		local vp = cam.ViewportSize
-		local p = lastTouch or Vector2.new(vp.X / 2, vp.Y / 2)
+		local p = Vector2.new(vp.X / 2, vp.Y / 2)
+		if not shiftlock and lastTouch then p = lastTouch end
 		local ray = cam:ViewportPointToRay(p.X, p.Y)
 		local params = RaycastParams.new()
 		params.FilterType = Enum.RaycastFilterType.Exclude
@@ -609,8 +625,7 @@ local function setupDryer(tool)
 		end)
 	end
 
-	-- Hold click (PC) or hold a finger on the RIGHT side of the screen (phone, camera drag works too).
-	-- Touches on the left side are the joystick, so they are ignored.
+	-- Hold click (PC) or hold a finger anywhere on the screen except the joystick (phone, camera drag works too).
 	local pressInput
 	local function isPress(i)
 		return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch
@@ -619,7 +634,9 @@ local function setupDryer(tool)
 		if processed or not isPress(i) then return end
 		if i.UserInputType == Enum.UserInputType.Touch then
 			local cam = workspace.CurrentCamera
-			if cam and i.Position.X < cam.ViewportSize.X * 0.4 then return end -- joystick area
+			local vp = cam and cam.ViewportSize
+			-- only the joystick zone (bottom-left) is ignored, the rest of the left side works
+			if vp and i.Position.X < vp.X * 0.3 and i.Position.Y > vp.Y * 0.45 then return end
 		end
 		if tool.Parent and tool.Parent == player.Character then
 			pressInput = i
@@ -1330,7 +1347,7 @@ local SETUP = {
 
 local HINTS = {
 	carpet = " - move to fly toward the camera, Space = up",
-	dryer = " - hold click, or hold a finger on the right side of the screen",
+	dryer = " - hold click, or hold a finger on the screen (not on the joystick)",
 	seabow = " - tap to shoot",
 	rocket = " - tap to fire",
 	gravity = " - low gravity is on",
@@ -1358,16 +1375,58 @@ local function removeGear(cfg)
 	active[cfg.name] = nil
 end
 
+-- if the game takes a gear out of the backpack, it is put straight back in the same frame (no flicker).
+-- If the game destroys it, it is rebuilt - but only a few times, so a game that keeps deleting it can't cause flickering.
+local strikes = {}
+local function guardTool(cfg, tool)
+	tool.AncestryChanged:Connect(function(_, parent)
+		if active[cfg.name] ~= tool or not wanted[cfg.name] then return end
+		local bp = player:FindFirstChildOfClass("Backpack")
+		if parent == bp or parent == player.Character then return end
+		task.defer(function()
+			if active[cfg.name] ~= tool or not wanted[cfg.name] then return end
+			local bp2 = player:FindFirstChildOfClass("Backpack")
+			local back = bp2 and pcall(function() tool.Parent = bp2 end) and tool.Parent == bp2
+			if back then
+				if os.clock() - (strikes.movedAt or 0) > 5 then
+					say("The game moved " .. cfg.name .. " out of your inventory - put it back")
+				end
+				strikes.movedAt = os.clock()
+			elseif Hooks.onRemoved then
+				Hooks.onRemoved(cfg)
+			end
+		end)
+	end)
+end
+
+-- wait (briefly) for the real model instead of giving a placeholder and swapping it later:
+-- the swap destroyed and rebuilt the tool, which is what made the hotbar slot flicker.
+-- Only waits when the model is still loading; already-loaded gears are still instant.
+local function waitForModel(cfg, maxWait)
+	if not cfg.id or cache[cfg.id] ~= nil or not loading[cfg.id] then return end
+	say(cfg.name .. " loading...")
+	local t0 = os.clock()
+	while cache[cfg.id] == nil and loading[cfg.id] and os.clock() - t0 < maxWait do
+		task.wait(0.05)
+	end
+end
+
 local function giveGear(cfg)
+	waitForModel(cfg, 6)
 	removeGear(cfg)
+	-- at game start the character may still be spawning (spawning wipes the backpack), so wait for it
+	local char = player.Character or player.CharacterAdded:Wait()
+	char:WaitForChild("Humanoid", 10)
+	pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, true) end)
 	local backpack = player:FindFirstChildOfClass("Backpack") or player:WaitForChild("Backpack", 5)
 	if not backpack then return false, cfg.name .. " failed: no backpack" end
 
-	local tool, reason = loadTool(cfg)
+	local tool = loadTool(cfg)
 	-- into the inventory FIRST, so it always shows even if a setup step errors
 	tool.Parent = backpack
 	active[cfg.name] = tool
 	wanted[cfg.name] = true
+	guardTool(cfg, tool)
 
 	local problems = {}
 	local function try(fn, ...)
@@ -1382,16 +1441,39 @@ local function giveGear(cfg)
 	end)
 
 	if #problems > 0 then
-		return true, cfg.name .. " given (a feature had an error: " .. problems[1] .. ")"
+		warn("[VestaGears] " .. cfg.name .. ": " .. problems[1])
 	end
-	if reason then
-		return true, cfg.name .. " given with built-in model (" .. reason .. ")"
-	end
-	return true, cfg.name .. " given - equip it from your hotbar"
+	return true, cfg.name .. " given"
 end
 
 -- start loading every real model in the background (same id is only loaded once)
 local rows = {}
+Hooks.onRemoved = function(cfg)
+	local st = strikes[cfg.name]
+	if not st then
+		st = { n = 0, t = 0, busy = false }
+		strikes[cfg.name] = st
+	end
+	if st.busy or not wanted[cfg.name] then return end
+	st.busy = true
+	if os.clock() - st.t > 10 then st.n = 0 end
+	st.n += 1
+	st.t = os.clock()
+	if st.n >= 3 then
+		-- the game keeps deleting it: stop, so nothing flickers
+		wanted[cfg.name] = nil
+		active[cfg.name] = nil
+		if rows[cfg.name] then rows[cfg.name].setOn(false) end
+		say(cfg.name .. " keeps getting removed by this game")
+	else
+		task.wait(0.15)
+		if wanted[cfg.name] then
+			giveGear(cfg)
+			if rows[cfg.name] then rows[cfg.name].setOn(active[cfg.name] ~= nil) end
+		end
+	end
+	st.busy = false
+end
 local function onLoaded(id)
 	local bp = player:FindFirstChildOfClass("Backpack")
 	for _, cfg in ipairs(GEARS) do
@@ -1431,7 +1513,7 @@ end
 Hooks.status = status
 
 local FULL_SIZE = UDim2.new(0, 330, 0, 466)
-local MINI_SIZE = UDim2.new(0, 150, 0, 34)
+local MINI_SIZE = UDim2.new(0, 132, 0, 38)
 
 local function buildGui()
 	local genv = (getgenv and getgenv()) or _G
@@ -1456,48 +1538,91 @@ local function buildGui()
 		return o
 	end
 	local function round(o, r)
-		mk("UICorner", { CornerRadius = UDim.new(0, r or 8) }, o)
+		return mk("UICorner", { CornerRadius = UDim.new(0, r or 8) }, o)
+	end
+	local function tween(o, t, props)
+		TweenService:Create(o, TweenInfo.new(t, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
+	end
+	-- smooth hover colour; the two functions let it follow a button's current state (GIVE / REMOVE)
+	local function hover(o, getNormal, getOver)
+		o.MouseEnter:Connect(function() tween(o, 0.12, { BackgroundColor3 = getOver() }) end)
+		o.MouseLeave:Connect(function() tween(o, 0.12, { BackgroundColor3 = getNormal() }) end)
 	end
 
-	local BG = Color3.fromRGB(0, 0, 0)
-	local PANEL = Color3.fromRGB(18, 18, 18)
-	local ACCENT = Color3.fromRGB(120, 90, 230)
-	local OFF = Color3.fromRGB(40, 40, 40)
+	-- palette: deep charcoal with one violet accent
+	local BG = Color3.fromRGB(12, 12, 17)
+	local ROW = Color3.fromRGB(22, 22, 30)
+	local ROW_HOVER = Color3.fromRGB(30, 30, 42)
+	local LINE = Color3.fromRGB(38, 38, 52)
+	local OFF = Color3.fromRGB(38, 38, 50)
+	local OFF_HOVER = Color3.fromRGB(54, 54, 70)
+	local ACCENT = Color3.fromRGB(124, 92, 255)
+	local ACCENT_HOVER = Color3.fromRGB(150, 122, 255)
+	local DANGER = Color3.fromRGB(140, 42, 54)
+	local DANGER_HOVER = Color3.fromRGB(176, 56, 70)
+	local WHITE = Color3.new(1, 1, 1)
 
 	local frame = mk("Frame", {
 		Name = "Main", Size = FULL_SIZE, Position = UDim2.new(0.5, -165, 0.5, -233),
-		BackgroundColor3 = BG, BorderSizePixel = 0, Active = true,
+		BackgroundColor3 = BG, BorderSizePixel = 0, Active = true, ClipsDescendants = true,
 	}, gui)
-	round(frame, 12)
-	local stroke = mk("UIStroke", { Color = ACCENT, Thickness = 1.5, Transparency = 0.3 }, frame)
+	local frameCorner = round(frame, 14)
 
-	local bar = mk("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = PANEL, BorderSizePixel = 0 }, frame)
-	round(bar, 12)
+	-- thin violet outline with a slow, soft glow travelling around it
+	local stroke = mk("UIStroke", { Color = WHITE, Thickness = 1.5 }, frame)
+	local strokeGrad = mk("UIGradient", {
+		Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, ACCENT),
+			ColorSequenceKeypoint.new(0.5, Color3.fromRGB(40, 40, 60)),
+			ColorSequenceKeypoint.new(1, ACCENT),
+		}),
+		Rotation = 0,
+	}, stroke)
+
+	-- title bar
+	local bar = mk("Frame", { Name = "Bar", Size = UDim2.new(1, 0, 0, 38), BackgroundTransparency = 1 }, frame)
+	local dot = mk("Frame", {
+		Size = UDim2.new(0, 8, 0, 8), Position = UDim2.new(0, 14, 0.5, -4), BackgroundColor3 = ACCENT, BorderSizePixel = 0,
+	}, bar)
+	round(dot, 4)
 	mk("TextLabel", {
-		Size = UDim2.new(1, -80, 1, 0), Position = UDim2.new(0, 12, 0, 0), BackgroundTransparency = 1,
-		Font = Enum.Font.GothamBold, Text = "Vesta Gears", TextSize = 15, TextColor3 = Color3.new(1, 1, 1),
+		Size = UDim2.new(1, -110, 1, 0), Position = UDim2.new(0, 30, 0, 0), BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold, Text = "VESTA GEARS", TextSize = 14, TextColor3 = WHITE,
 		TextXAlignment = Enum.TextXAlignment.Left,
 	}, bar)
-	local minBtn = mk("TextButton", {
-		Size = UDim2.new(0, 28, 0, 24), Position = UDim2.new(1, -66, 0, 5), BackgroundColor3 = OFF,
-		Font = Enum.Font.GothamBold, Text = "-", TextSize = 16, TextColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+	mk("Frame", {
+		Size = UDim2.new(1, -24, 0, 1), Position = UDim2.new(0, 12, 1, -1), BackgroundColor3 = LINE, BorderSizePixel = 0,
 	}, bar)
-	round(minBtn, 6)
-	local closeBtn = mk("TextButton", {
-		Size = UDim2.new(0, 28, 0, 24), Position = UDim2.new(1, -34, 0, 5), BackgroundColor3 = Color3.fromRGB(125, 30, 30),
-		Font = Enum.Font.GothamBold, Text = "X", TextSize = 14, TextColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
-	}, bar)
-	round(closeBtn, 6)
 
-	-- "Vesta Gears panel" button shown when minimised
+	local minBtn = mk("TextButton", {
+		Size = UDim2.new(0, 24, 0, 24), Position = UDim2.new(1, -62, 0.5, -12), BackgroundColor3 = OFF,
+		Font = Enum.Font.GothamBold, Text = "–", TextSize = 14, TextColor3 = WHITE, BorderSizePixel = 0, AutoButtonColor = false,
+	}, bar)
+	round(minBtn, 12)
+	hover(minBtn, function() return OFF end, function() return OFF_HOVER end)
+	local closeBtn = mk("TextButton", {
+		Size = UDim2.new(0, 24, 0, 24), Position = UDim2.new(1, -34, 0.5, -12), BackgroundColor3 = OFF,
+		Font = Enum.Font.GothamBold, Text = "×", TextSize = 16, TextColor3 = WHITE, BorderSizePixel = 0, AutoButtonColor = false,
+	}, bar)
+	round(closeBtn, 12)
+	hover(closeBtn, function() return OFF end, function() return DANGER_HOVER end)
+
+	-- minimised: a small pill that opens the menu again
 	local iconBtn = mk("TextButton", {
-		Name = "GearIcon", Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = Color3.new(0, 0, 0), BorderSizePixel = 0,
-		Font = Enum.Font.GothamBold, Text = "Vesta Gears panel", TextSize = 12, TextColor3 = Color3.new(1, 1, 1),
+		Name = "GearIcon", Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = BG, BorderSizePixel = 0,
+		Font = Enum.Font.GothamBold, Text = "VESTA GEARS", TextSize = 12, TextColor3 = WHITE,
 		AutoButtonColor = false, Visible = false, ZIndex = 5,
 	}, frame)
-	round(iconBtn, 12)
+	round(iconBtn, 19)
+	mk("UIPadding", { PaddingLeft = UDim.new(0, 18) }, iconBtn)
+	local iconDot = mk("Frame", {
+		Size = UDim2.new(0, 8, 0, 8), Position = UDim2.new(0, -2, 0.5, -4), BackgroundColor3 = ACCENT,
+		BorderSizePixel = 0, ZIndex = 6,
+	}, iconBtn)
+	round(iconDot, 4)
+	hover(iconBtn, function() return BG end, function() return ROW end)
 
-	local body = mk("Frame", { Size = UDim2.new(1, 0, 1, -34), Position = UDim2.new(0, 0, 0, 34), BackgroundTransparency = 1 }, frame)
+	local body = mk("Frame", { Name = "Body", Size = UDim2.new(1, 0, 1, -38), Position = UDim2.new(0, 0, 0, 38), BackgroundTransparency = 1 }, frame)
 
 	local collapsed = false
 	local function setCollapsed(c)
@@ -1505,15 +1630,21 @@ local function buildGui()
 		bar.Visible = not c
 		body.Visible = not c
 		iconBtn.Visible = c
-		frame.Size = c and MINI_SIZE or FULL_SIZE
-		-- minimised button: black background and black outline
-		frame.BackgroundColor3 = c and Color3.new(0, 0, 0) or BG
-		stroke.Color = c and Color3.new(0, 0, 0) or ACCENT
-		stroke.Transparency = c and 0 or 0.3
+		tween(frame, 0.2, { Size = c and MINI_SIZE or FULL_SIZE })
+		tween(frameCorner, 0.2, { CornerRadius = UDim.new(0, c and 19 or 14) })
 	end
 
-	-- dragging (title bar and gear icon). Only the finger/mouse that started the drag moves the menu,
-	-- so the joystick or another finger can never move it. A tap on the icon opens the menu.
+	-- the only animation: the outline glow drifts slowly; the minimised pill breathes very gently
+	local t0 = os.clock()
+	local anim = RunService.Heartbeat:Connect(function()
+		local t = os.clock() - t0
+		strokeGrad.Rotation = (t * 36) % 360
+		stroke.Transparency = collapsed and (0.3 + 0.25 * math.sin(t * 2.4)) or 0.1
+	end)
+	gui.Destroying:Connect(function() anim:Disconnect() end)
+
+	-- dragging (title bar and pill). Only the finger/mouse that started the drag moves the menu,
+	-- so the joystick or another finger can never move it. A tap on the pill opens the menu.
 	local dragging, dragInput, dragStart, startPos, moved, dragSource
 	local function beginDrag(src)
 		src.InputBegan:Connect(function(input)
@@ -1557,40 +1688,57 @@ local function buildGui()
 		dragInput = nil
 	end)
 
+	mk("TextLabel", {
+		Size = UDim2.new(1, -16, 0, 32), Position = UDim2.new(0, 8, 0, 4), BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium, Text = "Script is client sided:\nWill not affect others in game",
+		TextSize = 11, TextColor3 = Color3.fromRGB(135, 135, 160), TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Center,
+	}, body)
+
 	local search = mk("TextBox", {
-		Size = UDim2.new(1, -16, 0, 28), Position = UDim2.new(0, 8, 0, 8), BackgroundColor3 = PANEL, BorderSizePixel = 0,
-		Font = Enum.Font.Gotham, PlaceholderText = "Search gears...", PlaceholderColor3 = Color3.fromRGB(130, 130, 150),
-		Text = "", TextSize = 13, TextColor3 = Color3.new(1, 1, 1), ClearTextOnFocus = false,
+		Size = UDim2.new(1, -16, 0, 28), Position = UDim2.new(0, 8, 0, 40), BackgroundColor3 = ROW, BorderSizePixel = 0,
+		Font = Enum.Font.Gotham, PlaceholderText = "Search gears...", PlaceholderColor3 = Color3.fromRGB(115, 115, 140),
+		Text = "", TextSize = 13, TextColor3 = WHITE, ClearTextOnFocus = false,
 		TextXAlignment = Enum.TextXAlignment.Left,
 	}, body)
-	round(search, 8)
-	mk("UIPadding", { PaddingLeft = UDim.new(0, 10) }, search)
+	round(search, 10)
+	mk("UIPadding", { PaddingLeft = UDim.new(0, 12) }, search)
+	local searchStroke = mk("UIStroke", { Color = LINE, Thickness = 1 }, search)
+	search.Focused:Connect(function() tween(searchStroke, 0.15, { Color = ACCENT }) end)
+	search.FocusLost:Connect(function() tween(searchStroke, 0.15, { Color = LINE }) end)
 
 	local list = mk("ScrollingFrame", {
-		Size = UDim2.new(1, -16, 1, -146), Position = UDim2.new(0, 8, 0, 44), BackgroundTransparency = 1,
-		BorderSizePixel = 0, ScrollBarThickness = 4, CanvasSize = UDim2.new(0, 0, 0, 0),
+		Size = UDim2.new(1, -16, 1, -178), Position = UDim2.new(0, 8, 0, 76), BackgroundTransparency = 1,
+		BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = ACCENT, CanvasSize = UDim2.new(0, 0, 0, 0),
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 	}, body)
 	mk("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, list)
 
 	for i, cfg in ipairs(GEARS) do
-		local row = mk("Frame", { Size = UDim2.new(1, -6, 0, 34), BackgroundColor3 = PANEL, BorderSizePixel = 0, LayoutOrder = i }, list)
-		round(row, 8)
+		local row = mk("Frame", { Size = UDim2.new(1, -6, 0, 36), BackgroundColor3 = ROW, BorderSizePixel = 0, LayoutOrder = i }, list)
+		round(row, 10)
+		local rowStroke = mk("UIStroke", { Color = ACCENT, Thickness = 1, Transparency = 1 }, row)
+		hover(row, function() return ROW end, function() return ROW_HOVER end)
 		mk("TextLabel", {
-			Size = UDim2.new(0.68, 0, 1, 0), Position = UDim2.new(0, 10, 0, 0), BackgroundTransparency = 1,
-			Font = Enum.Font.GothamMedium, Text = cfg.name, TextSize = 12, TextColor3 = Color3.new(1, 1, 1),
+			Size = UDim2.new(0.64, 0, 1, 0), Position = UDim2.new(0, 12, 0, 0), BackgroundTransparency = 1,
+			Font = Enum.Font.GothamMedium, Text = cfg.name, TextSize = 12, TextColor3 = WHITE,
 			TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
 		}, row)
 		local btn = mk("TextButton", {
-			Size = UDim2.new(0.28, 0, 0, 24), Position = UDim2.new(0.7, 0, 0, 5), BackgroundColor3 = OFF,
-			Font = Enum.Font.GothamBold, Text = "GIVE", TextSize = 11, TextColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+			Size = UDim2.new(0.28, 0, 0, 24), Position = UDim2.new(0.7, 0, 0.5, -12), BackgroundColor3 = OFF,
+			Font = Enum.Font.GothamBold, Text = "GIVE", TextSize = 11, TextColor3 = WHITE, BorderSizePixel = 0,
+			AutoButtonColor = false,
 		}, row)
-		round(btn, 6)
+		round(btn, 12)
 
+		local isOn = false
 		local function setOn(on)
+			isOn = on
 			btn.Text = on and "REMOVE" or "GIVE"
-			btn.BackgroundColor3 = on and ACCENT or OFF
+			tween(btn, 0.15, { BackgroundColor3 = on and ACCENT or OFF })
+			tween(rowStroke, 0.15, { Transparency = on and 0.5 or 1 })
 		end
+		hover(btn, function() return isOn and ACCENT or OFF end, function() return isOn and ACCENT_HOVER or OFF_HOVER end)
 		rows[cfg.name] = { setOn = setOn, frame = row }
 
 		btn.MouseButton1Click:Connect(function()
@@ -1600,9 +1748,14 @@ local function buildGui()
 				setOn(false)
 				status(cfg.name .. " removed")
 			else
+				strikes[cfg.name] = nil
 				local _, msg = giveGear(cfg)
 				setOn(active[cfg.name] ~= nil)
 				status(msg)
+				-- put it in your hand straight away (same as the Crossbow script), so it shows even if the hotbar is hidden
+				local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+				local t = active[cfg.name]
+				if hum and t and t.Parent then pcall(function() hum:EquipTool(t) end) end
 			end
 		end)
 	end
@@ -1614,39 +1767,42 @@ local function buildGui()
 		end
 	end)
 
-	local function footerButton(text, x, color)
+	local function footerButton(text, x, color, colorHover)
 		local b = mk("TextButton", {
 			Size = UDim2.new(0.5, -12, 0, 28), Position = UDim2.new(x, x == 0 and 8 or 4, 1, -92), BackgroundColor3 = color,
-			Font = Enum.Font.GothamBold, Text = text, TextSize = 12, TextColor3 = Color3.new(1, 1, 1), BorderSizePixel = 0,
+			Font = Enum.Font.GothamBold, Text = text, TextSize = 12, TextColor3 = WHITE, BorderSizePixel = 0,
+			AutoButtonColor = false,
 		}, body)
-		round(b, 8)
+		round(b, 10)
+		hover(b, function() return color end, function() return colorHover end)
 		return b
 	end
-	local giveAllBtn = footerButton("GIVE ALL", 0, ACCENT)
-	local removeAllBtn = footerButton("REMOVE ALL", 0.5, Color3.fromRGB(125, 30, 30))
+	local giveAllBtn = footerButton("GIVE ALL", 0, ACCENT, ACCENT_HOVER)
+	local removeAllBtn = footerButton("REMOVE ALL", 0.5, DANGER, DANGER_HOVER)
 
 	statusLabel = mk("TextLabel", {
 		Size = UDim2.new(1, -16, 0, 32), Position = UDim2.new(0, 8, 1, -58), BackgroundTransparency = 1,
-		Font = Enum.Font.Gotham, Text = "Pick a gear. Hotbar shows 10, press ` for the full inventory.", TextSize = 11,
-		TextColor3 = Color3.fromRGB(190, 190, 210), TextWrapped = true,
+		Font = Enum.Font.Gotham, Text = "", TextSize = 11,
+		TextColor3 = Color3.fromRGB(165, 165, 190), TextWrapped = true,
 		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
 	}, body)
 
 	mk("TextLabel", {
 		Size = UDim2.new(1, -16, 0, 16), Position = UDim2.new(0, 8, 1, -20), BackgroundTransparency = 1,
 		Font = Enum.Font.GothamMedium, Text = "Made by FearVesta", TextSize = 11,
-		TextColor3 = Color3.fromRGB(150, 150, 170),
+		TextColor3 = Color3.fromRGB(105, 105, 130),
 	}, body)
 
 	giveAllBtn.MouseButton1Click:Connect(function()
 		local given = 0
 		for i, cfg in ipairs(GEARS) do
+			strikes[cfg.name] = nil
 			local ok = giveGear(cfg)
 			rows[cfg.name].setOn(active[cfg.name] ~= nil)
 			if ok then given += 1 end
 			if i % 6 == 0 then task.wait() end -- tiny breather, no freeze
 		end
-		status(("%d gears given - press ` to see all of them"):format(given))
+		status(("%d gears given"):format(given))
 	end)
 	removeAllBtn.MouseButton1Click:Connect(function()
 		for _, cfg in ipairs(GEARS) do
@@ -1672,18 +1828,55 @@ end
 
 buildGui()
 
--- give the chosen gears again after every respawn
+-- ===== keep the gears in the inventory all the time (any game mode / role) =====
+-- When a game wipes or swaps the backpack (new round, role given, respawn), the SAME gear tool is put back
+-- instead of being rebuilt, so nothing flickers. A new copy is only made if the old one was destroyed.
+local restoring = false
+local function restoreGears()
+	if restoring then return end
+	restoring = true
+	local char = player.Character
+	local bp = player:FindFirstChildOfClass("Backpack")
+	if char and bp then
+		for _, cfg in ipairs(GEARS) do
+			if wanted[cfg.name] then
+				local t = active[cfg.name]
+				if not t or (t.Parent ~= bp and t.Parent ~= char) then
+					local back = false
+					if t then
+						back = pcall(function() t.Parent = bp end) and t.Parent == bp
+					end
+					if not back then
+						Hooks.onRemoved(cfg)
+					end
+					if rows[cfg.name] then rows[cfg.name].setOn(active[cfg.name] ~= nil) end
+				end
+			end
+		end
+	end
+	restoring = false
+end
+
 player.CharacterAdded:Connect(function()
 	player:WaitForChild("Backpack")
 	task.wait(0.3)
-	local names = {}
-	for _, cfg in ipairs(GEARS) do
-		if wanted[cfg.name] then names[#names + 1] = cfg end
-	end
-	for i, cfg in ipairs(names) do
-		giveGear(cfg)
-		if rows[cfg.name] then rows[cfg.name].setOn(active[cfg.name] ~= nil) end
-		if i % 6 == 0 then task.wait() end
+	for k in pairs(strikes) do strikes[k] = nil end -- a new life is not the game deleting your gears
+	restoreGears()
+end)
+
+task.spawn(function()
+	while true do
+		task.wait(1)
+		-- gently switch the Roblox inventory back on (once a second, not every frame, so the hotbar can fill in)
+		if next(wanted) then
+			local ok, enabled = pcall(function()
+				return StarterGui:GetCoreGuiEnabled(Enum.CoreGuiType.Backpack)
+			end)
+			if ok and not enabled then
+				pcall(function() StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, true) end)
+			end
+		end
+		restoreGears()
 	end
 end)
 
